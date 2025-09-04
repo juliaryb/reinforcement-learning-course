@@ -175,3 +175,10 @@ cython_debug/
 
 # Own gitignores
 monte-carlo-tree-search/mcts.png
+hindsight-experience-replay/README_original.md
+hindsight-experience-replay/startup.sh
+hindsight-experience-replay/requirements.txt
+hindsight-experience-replay/my_venv
+hindsight-experience-replay/logs/
+hindsight-experience-replay/outputs/
+hindsight-experience-replay/runs/

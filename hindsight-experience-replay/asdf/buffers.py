@@ -26,7 +26,7 @@ class BaseBuffer(ABC):
         self.terminations = torch.zeros(size, dtype=torch.float32, device=device)
         self.truncations = torch.zeros(size, dtype=torch.float32, device=device)
         self.infos = np.empty((size,), dtype=object)
-        self._ptr, self.size, self.max_size = 0, 0, size
+        self._ptr, self.size, self.max_size = 0, 0, size # the pointer to where the next transition will be stored
 
     def store(
         self,
@@ -157,7 +157,9 @@ class HerReplayBuffer(DictReplayBuffer):
         # TODO: fill this in
         # You can put additional attributes here if needed.
         # Also: There is a number of methods in the base class that could be useful to override.
-
+        
+        self.episodes = []  # list of completed episodes
+        self.current_episode = None  # will be filled in by start_episode()
    
     def store(
         self,
@@ -172,21 +174,108 @@ class HerReplayBuffer(DictReplayBuffer):
         # TODO: fill this in
         # Just a suggestion: it may make sense to modify this method
         
-        # Store the transition
-        super().store(
-            observation=observation,
-            action=action,
-            reward=reward,
-            next_observation=next_observation,
-            terminated=terminated,
-            truncated=truncated,
-            info=info,
-        )
-
+        # IMPORTANT: Store the transition - NO because we don't want to store every transition every step - just full episodes?
+        # super().store(
+        #     observation=observation,
+        #     action=action,
+        #     reward=reward,
+        #     next_observation=next_observation,
+        #     terminated=terminated,
+        #     truncated=truncated,
+        #     info=info,
+        # )
+        done = terminated or truncated
+        self.current_episode["observations"].append(observation)
+        self.current_episode["actions"].append(action)
+        self.current_episode["rewards"].append(reward)
+        self.current_episode["next_observations"].append(next_observation)
+        self.current_episode["terminations"].append(terminated)
+        self.current_episode["truncations"].append(truncated)
+        self.current_episode["infos"].append(info)
         # TODO: fill this in
         # Or maybe here?
 
+    def start_episode(self):    # this is run when an episode starts in a training loop 
+        self.current_episode = {
+            "observations": [],
+            "actions": [],
+            "rewards": [],
+            "next_observations": [],
+            "terminations": [],
+            "truncations": [],
+            "infos": [],
+        }
 
+    def end_episode(self):
+        if self.selection_strategy == "future":
+            episode = self.current_episode
+            ep_len = len(episode["actions"])
+            
+            # # Sanity check
+            # if ep_len == 0:
+            #     return
+
+            # For each transition, create n_sampled_goal augmented transitions where the goal is replaced with a future achieved goal
+            
+            for t in range(ep_len):
+                # Store original transition
+                self._store_transition_at_index(t, episode)
+                
+                future_idxs = []
+                # Only sample future goals if there are future steps available
+                if t + 1 < ep_len:
+                    # Define the range of future timesteps
+                    possible_future_steps = list(range(t + 1, ep_len))
+
+                    # Sample n_sampled_goal future timesteps (with replacement)
+                    future_idxs = np.random.choice(
+                        possible_future_steps, 
+                        size=self.n_sampled_goal, 
+                        replace=True  # allow duplicates
+                    )
+
+                # for each sampled future index, relabel the goal
+                for future_t in future_idxs:
+                    new_goal = episode["next_observations"][future_t]["achieved_goal"]
+
+                    # Copy transition
+                    obs = episode["observations"][t].copy()
+                    next_obs = episode["next_observations"][t].copy()
+
+                    # Relabel goal
+                    obs["desired_goal"] = new_goal
+                    next_obs["desired_goal"] = new_goal
+
+                    # Recompute reward
+                    reward = self.env.unwrapped.compute_reward(
+                        next_obs["achieved_goal"],  # checking if the result is what we wanted to do; this reflects the effect of the action
+                        new_goal,
+                        info={}
+                    )
+
+                    # Store relabeled transition
+                    super().store(
+                        observation=obs,
+                        action=episode["actions"][t],
+                        reward=reward,
+                        next_observation=next_obs,
+                        terminated=episode["terminations"][t],
+                        truncated=episode["truncations"][t],
+                        info=episode["infos"][t],
+                    )
+        # reset for the next episode
+        # self.current_episode = None
+
+    def _store_transition_at_index(self, t, episode):
+        super().store(
+            observation=episode["observations"][t],
+            action=episode["actions"][t],
+            reward=episode["rewards"][t],
+            next_observation=episode["next_observations"][t],
+            terminated=episode["terminations"][t],
+            truncated=episode["truncations"][t],
+            info=episode["infos"][t],
+        )
 
 
 

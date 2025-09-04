@@ -16,6 +16,9 @@ from .loggers import SilentLogger
 from .policies import MlpPolicy
 from .utils import count_vars
 
+from gymnasium.wrappers import RecordVideo
+import os
+
 
 
 class SAC:
@@ -194,6 +197,9 @@ class SAC:
             # TODO: fill this in
             # self.alpha = ...
             # self.alpha_optimizer = ...
+            self.log_alpha = torch.tensor(np.log(init_value), requires_grad=True, device=alpha_device)
+            self.alpha = self.log_alpha.exp().detach()
+            self.alpha_optimizer = Adam([self.log_alpha], lr=lr)
         else:
             # Force conversion to float
             # this will throw an error if a malformed string (different from 'auto') is passed
@@ -259,8 +265,8 @@ class SAC:
         # so we don't change it with other losses
         # see https://github.com/rail-berkeley/softlearning/issues/60
         # TODO: fill this in
-        alpha_loss = 0
-        alpha = 0
+        alpha = self.log_alpha.exp()
+        alpha_loss = -(self.log_alpha * (logp_pi + self.target_entropy).detach()).mean()
         return alpha_loss, alpha
         # Remember to use target_entropy
 
@@ -299,10 +305,14 @@ class SAC:
 
         # Optimize entropy coefficient, also called
         # entropy temperature or alpha in the paper
-        if self.alpha_optimizer is not None:
+        if hasattr(self, "alpha_optimizer") and self.alpha_optimizer is not None:
             alpha_loss, alpha = self.compute_loss_alpha(logp_pi)
             # TODO: fill this in
             # Update alpha...
+            self.alpha_optimizer.zero_grad()
+            alpha_loss.backward()
+            self.alpha_optimizer.step()
+            self.alpha = self.log_alpha.exp().detach()
         else:
             alpha_loss = np.array(0)
 
@@ -387,7 +397,7 @@ class SAC:
         return results
 
 
-    def train(self, n_steps, log_interval=1000, callbacks=[]):
+    def train(self, n_steps, log_interval=1000, callbacks=[], path_to_vid = "videos"):
         # Prepare for interaction with environment
         (o, i), ep_ret, ep_len = self.env.reset(), 0, 0
         self.buffer.start_episode()
@@ -426,7 +436,7 @@ class SAC:
 
                 # Update handling
                 if t >= self.update_after and t % self.update_every == 0:
-                    for j in range(self.n_updates or self.update_every):
+                    for j in range(self.n_updates or self.update_every):    # if n_updates is not None and >0 use it, else update_every
                         batch = self.buffer.sample_batch(self.batch_size)
                         losses = self.update(data=batch)
                         self.logger.log_scalar("loss_q", losses["q"], t)
@@ -438,9 +448,13 @@ class SAC:
                 if t % log_interval == 0:
                     # Test the performance of the deterministic version of the agent.
                     results = self.test(self.env, self.n_test_episodes)
+                    # results = self.test(video_env, self.n_test_episodes)
                     prgs.set_description(f"test_ep_return {results['mean_ep_ret']:.3g}")
                     self.logger.log_scalar("test_ep_return", results["mean_ep_ret"], t)
                     self.logger.log_scalar("test_ep_length", results["mean_ep_len"], t)
+
+                    # print alpha to slurm .out
+                    print(f"[t={t}] test_ep_return={results['mean_ep_ret']:.3f} alpha={self.alpha.item():.4f}")
 
                     stop = False
 
@@ -464,6 +478,9 @@ class SAC:
                 "q_optimizer_state_dict": self.q_optimizer.state_dict(),
                 # TODO: fill this in
                 # "alpha_optimizer_state_dict": ...,
+                "alpha_optimizer_state_dict": self.alpha_optimizer.state_dict(),
+                "log_alpha": self.log_alpha,
+
             },
             path,
         )
@@ -476,3 +493,7 @@ class SAC:
         self.alpha = checkpoint["alpha"]
         # TODO: fill this in
         # self.alpha_optimizer = ...
+        self.log_alpha = checkpoint["log_alpha"]
+        self.alpha_optimizer = Adam([self.log_alpha], lr=self.pi_optimizer.param_groups[0]["lr"])
+        self.alpha_optimizer.load_state_dict(checkpoint["alpha_optimizer_state_dict"])
+        self.alpha = self.log_alpha.exp().detach()
